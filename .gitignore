@@ -1,0 +1,10 @@
+# Bağımlılıklar (ÇOK BÜYÜK VE GEREKSİZ)
+/node_modules
+
+# Log Dosyaları
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ortam Değişkenleri (GİZLİ BİLGİLER İÇERİR)
+.env
