@@ -1,11 +1,10 @@
 // controllers/chatControllers.js
 
-const { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } = require('@google/generative-ai');
-const { performGoogleSearch } = require('../utils/googleSearch');
-const database = require('../config/database');
-const { saveMessage } = require('./messageControllers');
-
-const chatHistories = new Map();
+const { GoogleGenerativeAI, HarmBlockThreshold, HarmCategory } = require('@google/generative-ai'); //
+const { performGoogleSearch } = require('../utils/googleSearch'); //
+const database = require('../config/database'); //
+const { saveMessage } = require('./messageControllers'); //
+const Message = require('../models/messages'); // Veritabanından geçmişi okumak için eklendi
 
 const initialHistory = [
     {
@@ -20,20 +19,42 @@ Senden sıralama veya herhangi bir madde gerektiren bir şey istenirse bunları 
     },
     {
         role: "model",
-        parts: [{ text: "Anladım. Güncel bilgiye, tanımlara veya spesifik bilgilere ihtiyacım olduğunda 'google_search' aracını çağırarak arama yapacağım. Veritabanı işlemleri için ise 'create_post', 'get_posts_by_author', 'update_post', 'delete_post', 'get_all_posts' gibi araçları kullanacağım. Tüm sonuçları ve kaynakları yanıtıma dahil edeceğim. **Yanıtlarımda kullandığım araçların teknik adlarını doğrudan belirtmeyecek, bu işlemleri daha doğal bir şekilde ifade edeceğim.**" }]
+        parts: [{ text: "Anladım. Güncel bilgiye, tanımlara veya spesifik bilgilere ihtiyacım olduğunda 'Google Search' aracını çağırarak arama yapacağım. Veritabanı işlemleri için ise 'create_post', 'get_posts_by_author', 'update_post', 'delete_post', 'get_all_posts' gibi araçları kullanacağım. Tüm sonuçları ve kaynakları yanıtıma dahil edeceğim. **Yanıtlarımda kullandığım araçların teknik adlarını doğrudan belirtmeyecek, bu işlemleri daha doğal bir şekilde ifade edeceğim.**" }]
     }
-];
+]; //
+
+
+/**
+ * Belirtilen oturum ve kullanıcıya ait sohbet geçmişini veritabanından çeker
+ * ve Gemini'nin anlayacağı formata dönüştürür.
+ * @param {string} sessionId Sohbet oturum kimliği
+ * @param {string} userId Kullanıcı kimliği
+ * @returns {Promise<Array>} Gemini için formatlanmış geçmiş
+ */
+const getHistoryForGemini = async (sessionId, userId) => {
+    // Veritabanından ilgili mesajları al ve tarihe göre sırala
+    const messagesFromDB = await Message.find({ sessionId, userId }).sort({ createdAt: 'asc' });
+
+    // Veritabanı formatını Gemini formatına dönüştür
+    const formattedHistory = messagesFromDB.map(msg => ({
+        role: msg.role, // "user" veya "model"
+        parts: [{ text: msg.content }]
+    }));
+
+    return formattedHistory;
+};
+
 
 const chatWithGemini = async (req, res, next) => {
     // API anahtarlarını req.app.locals üzerinden alın
-    const { geminiApiKey, googleSearchApiKey, googleSearchCx } = req.app.locals;
+    const { geminiApiKey, googleSearchApiKey, googleSearchCx } = req.app.locals; //
 
     if (!geminiApiKey || !googleSearchApiKey || !googleSearchCx) {
-        console.error('Sunucu yapılandırma hatası: API anahtarları eksik.');
-        return res.status(500).json({ error: 'Sunucu yapılandırma hatası: API anahtarları eksik.' });
+        console.error('Sunucu yapılandırma hatası: API anahtarları eksik.'); //
+        return res.status(500).json({ error: 'Sunucu yapılandırma hatası: API anahtarları eksik.' }); //
     }
 
-    const genAI = new GoogleGenerativeAI(geminiApiKey);
+    const genAI = new GoogleGenerativeAI(geminiApiKey); //
     const model = genAI.getGenerativeModel({
         model: "gemini-1.5-flash",
         tools: [{
@@ -109,17 +130,17 @@ const chatWithGemini = async (req, res, next) => {
                 },
             ],
         }],
-    });
+    }); //
 
-    const userId = req.user._id;
-    const userMessage = req.body.message;
-    const sessionId = req.body.sessionId;
+    const userId = req.user._id; //
+    const userMessage = req.body.message; //
+    const sessionId = req.body.sessionId; //
 
     if (!userMessage) {
-        return res.status(400).json({ error: 'Mesaj boş olamaz.' });
+        return res.status(400).json({ error: 'Mesaj boş olamaz.' }); //
     }
     if (!sessionId) {
-        return res.status(400).json({ error: 'sessionId boş olamaz. Lütfen bir oturum kimliği sağlayın.' });
+        return res.status(400).json({ error: 'sessionId boş olamaz. Lütfen bir oturum kimliği sağlayın.' }); //
     }
 
     try {
@@ -128,79 +149,70 @@ const chatWithGemini = async (req, res, next) => {
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ];
+        ]; //
 
-        let sessionData = chatHistories.get(sessionId);
+        // Her istekte, geçmişi veritabanından çek
+        const historyFromDB = await getHistoryForGemini(sessionId, userId);
 
-        if (!sessionData) {
-            console.log(`Yeni sohbet oturumu başlatılıyor: ${sessionId}`);
-            sessionData = {
-                history: [...initialHistory],
-            };
-            chatHistories.set(sessionId, sessionData);
-        } else {
-            console.log(`Mevcut sohbet oturumu kullanılıyor: ${sessionId}`);
-        }
-
+        // Modeli, hem başlangıç talimatları hem de veritabanından gelen geçmiş ile başlat
         const chat = model.startChat({
             safetySettings: safetySettings,
-            history: sessionData.history,
-        });
+            history: [...initialHistory, ...historyFromDB],
+        }); //
 
-        await saveMessage(userId, sessionId, 'user', userMessage);
+        await saveMessage(userId, sessionId, 'user', userMessage); //
 
-        const result = await chat.sendMessage(userMessage);
-        const response = result.response;
+        const result = await chat.sendMessage(userMessage); //
+        const response = result.response; //
 
-        sessionData.history = chat.history;
-        chatHistories.set(sessionId, sessionData);
+        // Hafıza tabanlı (in-memory) geçmiş yönetimi kaldırıldığı için ilgili satırlar silindi.
 
-        const functionCalls = response.functionCalls();
-        const text = response.text();
+        const functionCalls = response.functionCalls(); //
+        const text = response.text(); //
 
-        console.log("Modelden gelen yanıt:", JSON.stringify(response.candidates?.[0]?.content, null, 2));
+        console.log("Modelden gelen yanıt:", JSON.stringify(response.candidates?.[0]?.content, null, 2)); //
 
         if (functionCalls && functionCalls.length > 0) {
-            const call = functionCalls[0];
-            let toolResult;
+            const call = functionCalls[0]; //
+            let toolResult; //
 
             switch (call.name) {
                 case "google_search":
-                    console.log("Model 'google_search' fonksiyonunu çağırmak istedi, sorgu:", call.args.query);
-                    toolResult = await performGoogleSearch(call.args.query, googleSearchApiKey, googleSearchCx);
+                    console.log("Model 'google_search' fonksiyonunu çağırmak istedi, sorgu:", call.args.query); //
+                    toolResult = await performGoogleSearch(call.args.query, googleSearchApiKey, googleSearchCx); //
                     break;
                 case "create_post":
-                    console.log("Model 'create_post' fonksiyonunu çağırmak istedi, args:", call.args);
-                    toolResult = await database.createPost(call.args.author, call.args.text, call.args.tags);
+                    console.log("Model 'create_post' fonksiyonunu çağırmak istedi, args:", call.args); //
+                    toolResult = await database.createPost(call.args.author, call.args.text, call.args.tags); //
                     break;
                 case "get_posts_by_author":
-                    console.log("Model 'get_posts_by_author' fonksiyonunu çağırmak istedi, args:", call.args);
-                    toolResult = await database.getPostsByAuthor(call.args.authorName);
-                    toolResult = toolResult.map(post => ({ author: post.author, text: post.text, date: post.date, tags: post.tags }));
+                    console.log("Model 'get_posts_by_author' fonksiyonunu çağırmak istedi, args:", call.args); //
+                    toolResult = await database.getPostsByAuthor(call.args.authorName); //
+                    toolResult = toolResult.map(post => ({ author: post.author, text: post.text, date: post.date, tags: post.tags })); //
                     break;
                 case "update_post":
-                    console.log("Model 'update_post' fonksiyonunu çağırmak istedi, args:", call.args);
-                    toolResult = await database.updatePost(call.args.authorName, call.args.newText);
+                    console.log("Model 'update_post' fonksiyonunu çağırmak istedi, args:", call.args); //
+                    toolResult = await database.updatePost(call.args.authorName, call.args.newText); //
                     break;
                 case "delete_post":
-                    console.log("Model 'delete_post' fonksiyonunu çağırmak istedi, args:", call.args);
-                    toolResult = await database.deletePost(call.args.authorName);
+                    console.log("Model 'delete_post' fonksiyonunu çağırmak istedi, args:", call.args); //
+                    toolResult = await database.deletePost(call.args.authorName); //
                     break;
                 case "get_all_posts":
-                    console.log("Model 'get_all_posts' fonksiyonunu çağırmak istedi.");
-                    toolResult = await database.getPosts();
-                    toolResult = toolResult.map(post => ({ author: post.author, text: post.text, date: post.date, tags: post.tags }));
+                    console.log("Model 'get_all_posts' fonksiyonunu çağırmak istedi."); //
+                    toolResult = await database.getPosts(); //
+                    toolResult = toolResult.map(post => ({ author: post.author, text: post.text, date: post.date, tags: post.tags })); //
                     break;
                 default:
-                    console.warn('Bilinmeyen bir araç çağrısı algılandı:', call.name);
-                    return res.status(500).json({ error: `Bilinmeyen bir araç çağrısı algılandı: ${call.name}` });
+                    console.warn('Bilinmeyen bir araç çağrısı algılandı:', call.name); //
+                    return res.status(500).json({ error: `Bilinmeyen bir araç çağrısı algılandı: ${call.name}` }); //
             }
 
-            console.log(`${call.name} aracından dönen sonuç:`, toolResult);
+            console.log(`${call.name} aracından dönen sonuç:`, toolResult); //
 
-            const functionResponsePayload = { result: toolResult };
+            const functionResponsePayload = { result: toolResult }; //
             if (toolResult && toolResult.error) {
-                functionResponsePayload.error = toolResult.error;
+                functionResponsePayload.error = toolResult.error; //
             }
 
             const toolResponseResult = await chat.sendMessage([
@@ -210,40 +222,39 @@ const chatWithGemini = async (req, res, next) => {
                         response: functionResponsePayload,
                     },
                 },
-            ]);
+            ]); //
 
-            sessionData.history = chat.history;
-            chatHistories.set(sessionId, sessionData);
+            // Hafıza tabanlı (in-memory) geçmiş yönetimi kaldırıldığı için ilgili satırlar silindi.
 
-            const finalResponseText = toolResponseResult.response.text();
-            await saveMessage(userId, sessionId, 'model', finalResponseText);
+            const finalResponseText = toolResponseResult.response.text(); //
+            await saveMessage(userId, sessionId, 'model', finalResponseText); //
 
-            const cleanedResponseText = finalResponseText;
-            console.log("Araç sonucu modele geri gönderildi. Nihai yanıt alındı:", cleanedResponseText);
-            res.json({ reply: cleanedResponseText });
+            const cleanedResponseText = finalResponseText; //
+            console.log("Araç sonucu modele geri gönderildi. Nihai yanıt alındı:", cleanedResponseText); //
+            res.json({ reply: cleanedResponseText }); //
 
         } else if (text) {
-            await saveMessage(userId, sessionId, 'model', text);
-            console.log("Model doğrudan metin yanıtı verdi:", text);
-            res.json({ reply: text });
+            await saveMessage(userId, sessionId, 'model', text); //
+            console.log("Model doğrudan metin yanıtı verdi:", text); //
+            res.json({ reply: text }); //
         } else {
-            console.error("Modelden beklenmedik bir yanıt türü alındı.");
-            res.status(500).json({ error: 'Modelden beklenmedik bir yanıt türü alındı.' });
+            console.error("Modelden beklenmedik bir yanıt türü alındı."); //
+            res.status(500).json({ error: 'Modelden beklenmedik bir yanıt türü alındı.' }); //
         }
 
     } catch (error) {
-        console.error('API işleme sırasında genel hata:', error);
+        console.error('API işleme sırasında genel hata:', error); //
         if (error.response && error.response.candidates && error.response.candidates[0] && error.response.candidates[0].safetyRatings) {
             res.status(400).json({
                 error: 'Mesajınız güvenlik politikaları nedeniyle engellendi.',
                 details: error.response.candidates[0].safetyRatings
-            });
+            }); //
         } else if (error.message.includes("403") || error.message.includes("Forbidden")) {
-            res.status(403).json({ error: 'API anahtarınızın yetkilendirme sorunu olabilir veya Custom Search API etkin değil.', details: error.message });
+            res.status(403).json({ error: 'API anahtarınızın yetkilendirme sorunu olabilir veya Custom Search API etkin değil.', details: error.message }); //
         } else if (error.message.includes("400") && error.message.includes("cx")) {
-            res.status(400).json({ error: 'Programlanabilir Arama Motoru (CX) ID\'niz yanlış veya yapılandırma hatası var.', details: error.message });
+            res.status(400).json({ error: 'Programlanabilir Arama Motoru (CX) ID\'niz yanlış veya yapılandırma hatası var.', details: error.message }); //
         } else {
-            res.status(500).json({ error: 'Mesaj işlenirken beklenmeyen bir hata oluştu.', details: error.message });
+            res.status(500).json({ error: 'Mesaj işlenirken beklenmeyen bir hata oluştu.', details: error.message }); //
         }
     }
 };
@@ -251,4 +262,4 @@ const chatWithGemini = async (req, res, next) => {
 
 module.exports = {
     chatWithGemini
-};
+}; //
